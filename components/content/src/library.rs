@@ -365,7 +365,7 @@ impl Library {
             Self::add_translation(&mut self.translations, config, &page.file.canonical, &path);
 
             let mut parent_section_path = page.file.parent.join(&parent_filename);
-            sections_taxa.insert(parent_section_path.clone(), empty_tax.clone());
+            sections_taxa.entry(parent_section_path.clone()).or_insert(empty_tax.clone());
             while let Some(parent_section) = self.sections.get_mut(&parent_section_path) {
                 let is_transparent = parent_section.meta.transparent;
                 parent_section.pages.push(path.clone());
