@@ -406,9 +406,22 @@ impl Library {
             }
         }
 
-        dbg!(sections_taxa);
-        // TODO: Convert base_taxa to Taxonomy and propagate taxonomies to parent sections here
+        dbg!(&sections_taxa);
 
+        // TODO: Just build from self.taxonomies_def here? Filter on sections in file paths? e.g. filter prefix
+        dbg!(&self.taxonomies_def);
+
+        for (section, taxo_data) in sections_taxa {
+            // Convert base_taxa to Taxonomy and add to this Section
+            let taxonomies = self.find_taxonomies_with_def(config, &taxo_data);
+            dbg!(&taxonomies);
+            if let Some(v) = self.sections.get_mut(&section) {
+                v.taxonomies = taxonomies;
+            }
+
+            // TODO: Also merge into parent sections
+        }
+        dbg!(&self.sections);
         // And once we have all the pages assigned to their section, we sort them
         self.sort_section_pages();
     }
