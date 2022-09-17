@@ -369,7 +369,7 @@ impl Library {
             while let Some(parent_section) = self.sections.get_mut(&parent_section_path) {
                 let is_transparent = parent_section.meta.transparent;
                 parent_section.pages.push(path.clone());
-                // TODO: Read and push taxonomies here?
+                // Read and push taxonomies here
                 // First push to immediate section (i.e. page parent), then bubble up to ancestors - merging taxonomies
 
                 let base_taxa = sections_taxa
@@ -406,24 +406,64 @@ impl Library {
             }
         }
 
-        dbg!(&sections_taxa);
-
         // TODO: Just build from self.taxonomies_def here? Filter on sections in file paths? e.g. filter prefix
-        dbg!(&self.taxonomies_def);
+        // dbg!(&self.taxonomies_def);
 
         for (section, taxo_data) in sections_taxa {
             // Convert base_taxa to Taxonomy and add to this Section
             let taxonomies = self.find_taxonomies_with_def(config, &taxo_data);
-            dbg!(&taxonomies);
+
+            // If taxonomy doesn't exist then insert, otherwise merge in
             if let Some(v) = self.sections.get_mut(&section) {
-                v.taxonomies = taxonomies;
+                Self::merge_taxonomies(&mut v.taxonomies, &taxonomies);
             }
 
-            // TODO: Also merge into parent sections
+            // Merge section taxonomy into ancestor sections
+            let cur_path = content_path.to_path_buf();
+            for ancestor in &self.sections.get(&section).unwrap().ancestors.clone() {
+                let ancestor_path = cur_path.join(ancestor);
+                if let Some(v) = &mut self.sections.get_mut(&ancestor_path) {
+                    Self::merge_taxonomies(&mut v.taxonomies, &taxonomies);
+                }
+            }
         }
-        dbg!(&self.sections);
         // And once we have all the pages assigned to their section, we sort them
         self.sort_section_pages();
+    }
+
+    fn merge_taxonomies(target: &mut Vec<Taxonomy>, to_merge: &[Taxonomy]) {
+        for t in to_merge {
+            let tax_mut = target.iter_mut().find(|vt| *vt.kind.name == t.kind.name);
+            // If Taxonomy already exists then merge in terms
+            // Otherwise insert taxonomy
+            match tax_mut {
+                None => {
+                    target.push(t.clone());
+                }
+                Some(tax_ref) => {
+                    for term in &t.items {
+                        let term_mut = tax_ref
+                            .items
+                            .iter_mut()
+                            .find(|ancestor_term| *ancestor_term.name == term.name);
+                        // If Term already exists then merge in pages
+                        // Otherwise insert term
+                        match term_mut {
+                            None => {
+                                tax_ref.items.push(term.clone());
+                            }
+                            Some(term_ref) => {
+                                for page in &term.pages {
+                                    if !term_ref.pages.contains(page) {
+                                        term_ref.pages.push(page.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Find all the orphan pages: pages that are in a folder without an `_index.md`
@@ -713,7 +753,7 @@ mod tests {
 
     fn create_page_w_taxa(path: &str, lang: &str, taxo: Vec<(&str, Vec<&str>)>) -> Page {
         let mut page = Page::default();
-        page.file.path = PathBuf::from(path);
+        page.file = FileInfo::new_page(Path::new(path), &PathBuf::new());
         page.lang = lang.to_owned();
         let mut taxonomies = HashMap::new();
         for (name, terms) in taxo {
@@ -871,5 +911,123 @@ mod tests {
             set! {PathBuf::from("page1.md"), PathBuf::from("_index.md")}
         );
         assert_eq!(library.backlinks["_index.md"], set! {PathBuf::from("page2.md")});
+    }
+
+    #[test]
+    fn can_populate_sections_with_taxonomies() {
+        let mut config = Config::default_for_test();
+        config.languages.get_mut("en").unwrap().taxonomies = vec![
+            TaxonomyConfig { name: "categories".to_string(), ..TaxonomyConfig::default() },
+            TaxonomyConfig { name: "tags".to_string(), ..TaxonomyConfig::default() },
+            TaxonomyConfig { name: "authors".to_string(), ..TaxonomyConfig::default() },
+        ];
+        config.slugify_taxonomies();
+
+        let mut library = Library::new(&config);
+
+        let sections = vec![
+            ("content/_index.md", "en", 0, false, SortBy::None),
+            ("content/blog/_index.md", "en", 0, false, SortBy::None),
+            ("content/blog/subblog/_index.md", "en", 0, false, SortBy::None),
+            ("content/wiki/_index.md", "en", 0, false, SortBy::None),
+        ];
+        for (p, l, w, t, s) in sections.clone() {
+            library.insert_section(create_section(p, l, w, t, s));
+        }
+        let page1 = create_page_w_taxa(
+            "content/blog/subblog/a.md",
+            "en",
+            vec![("tags", vec!["rust", "db"]), ("categories", vec!["tutorials"])],
+        );
+        let page2 = create_page_w_taxa(
+            "content/blog/b.md",
+            "en",
+            vec![("tags", vec!["rust", "js"]), ("categories", vec!["others"])],
+        );
+        let page3 = create_page_w_taxa(
+            "content/wiki/c.md",
+            "en",
+            vec![("tags", vec!["js"]), ("authors", vec!["James McMurray"])],
+        );
+
+        library.insert_page(page1);
+        library.insert_page(page2);
+        library.insert_page(page3);
+
+        library.populate_sections(&config, Path::new("content"));
+        assert_eq!(library.sections.len(), 4);
+
+        // Test Leaf section - subblog
+        let subblog_section = &library.sections[&PathBuf::from("content/blog/subblog/_index.md")];
+        assert_eq!(subblog_section.taxonomies.len(), 3);
+
+        let mut subblog_tags =
+            subblog_section.taxonomies.iter().find(|t| t.kind.name == "tags").unwrap().clone();
+        subblog_tags.items.sort_by(|x, y| x.name.partial_cmp(&y.name).unwrap());
+        assert_eq!(subblog_tags.items.len(), 2);
+        assert_eq!(subblog_tags.items[0].name, "db");
+        assert_eq!(subblog_tags.items[0].pages.len(), 1);
+        assert_eq!(subblog_tags.items[0].pages[0], Path::new("content/blog/subblog/a.md"));
+        assert_eq!(subblog_tags.items[1].name, "rust");
+        assert_eq!(subblog_tags.items[1].pages.len(), 1);
+        assert_eq!(subblog_tags.items[1].pages[0], Path::new("content/blog/subblog/a.md"));
+
+        // Test Parent section - blog
+        let blog_section = &library.sections[&PathBuf::from("content/blog/_index.md")];
+        assert_eq!(blog_section.taxonomies.iter().filter(|t| t.kind.name == "tags").count(), 1);
+        let mut blog_tags =
+            blog_section.taxonomies.iter().find(|t| t.kind.name == "tags").unwrap().clone();
+
+        blog_tags.items.sort_by(|x, y| x.name.partial_cmp(&y.name).unwrap());
+        blog_tags.items[2]
+            .pages
+            .sort_by(|x, y| x.to_string_lossy().partial_cmp(&y.to_string_lossy()).unwrap());
+        assert_eq!(blog_tags.items.len(), 3);
+        assert_eq!(blog_tags.items[0].name, "db");
+        assert_eq!(blog_tags.items[0].pages.len(), 1);
+        assert_eq!(blog_tags.items[0].pages[0], Path::new("content/blog/subblog/a.md"));
+        assert_eq!(blog_tags.items[1].name, "js");
+        assert_eq!(blog_tags.items[1].pages.len(), 1);
+        assert_eq!(blog_tags.items[1].pages[0], Path::new("content/blog/b.md"));
+        assert_eq!(blog_tags.items[2].name, "rust");
+        assert_eq!(
+            blog_tags.items[2].pages,
+            vec![Path::new("content/blog/b.md"), Path::new("content/blog/subblog/a.md")]
+        );
+
+        // Test root section (contains wiki taxonomy too)
+        let root_section = &library.sections[&PathBuf::from("content/_index.md")];
+        assert_eq!(root_section.taxonomies.iter().filter(|t| t.kind.name == "tags").count(), 1);
+        let mut root_tags =
+            root_section.taxonomies.iter().find(|t| t.kind.name == "tags").unwrap().clone();
+        root_tags.items.sort_by(|x, y| x.name.partial_cmp(&y.name).unwrap());
+        root_tags.items[1]
+            .pages
+            .sort_by(|x, y| x.to_string_lossy().partial_cmp(&y.to_string_lossy()).unwrap());
+        root_tags.items[2]
+            .pages
+            .sort_by(|x, y| x.to_string_lossy().partial_cmp(&y.to_string_lossy()).unwrap());
+
+        assert_eq!(root_tags.items.len(), 3);
+        assert_eq!(root_tags.items[0].name, "db");
+        assert_eq!(root_tags.items[0].pages.len(), 1);
+        assert_eq!(root_tags.items[0].pages[0], Path::new("content/blog/subblog/a.md"));
+        assert_eq!(root_tags.items[1].name, "js");
+        assert_eq!(
+            root_tags.items[1].pages,
+            vec![Path::new("content/blog/b.md"), Path::new("content/wiki/c.md")]
+        );
+        assert_eq!(root_tags.items[2].name, "rust");
+        assert_eq!(
+            root_tags.items[2].pages,
+            vec![Path::new("content/blog/b.md"), Path::new("content/blog/subblog/a.md")]
+        );
+
+        let root_authors =
+            root_section.taxonomies.iter().find(|t| t.kind.name == "authors").unwrap();
+        assert_eq!(root_authors.items.len(), 1);
+        assert_eq!(root_authors.items[0].name, "James McMurray");
+        assert_eq!(root_authors.items[0].pages.len(), 1);
+        assert_eq!(root_authors.items[0].pages[0], Path::new("content/wiki/c.md"));
     }
 }
